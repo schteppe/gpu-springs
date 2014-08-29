@@ -8,6 +8,9 @@
 <script src="dat.gui.js"></script>
 <title>GPU springs</title>
 <style>
+body{
+	overflow:hidden;
+}
 #goo {
 	position: absolute;
 	top: 0px;
@@ -17,6 +20,22 @@
 	width: 100%;
 	height: 100%;
 }
+#demo-info {
+	position: absolute;
+	top: 0;
+	left:85px;
+	z-index: 1000;
+	padding:10px;
+	font-family: Helvetica,sans-serif;
+	color:white;
+	text-align: center;
+	font-size: 12px;
+}
+#demo-info a {
+	color:white;
+	text-decoration: none;
+}
+
 </style>
 </head>
 <body>
@@ -628,7 +647,9 @@
 			gui.add(demo, 'size2048');
 		});
 	});
-
 </script>
+<div id="demo-info">
+	GPU springs by <a href="http://twitter.com/schteppe">@schteppe</a>
+</div>
 </body>
 </html>
