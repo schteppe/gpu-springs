@@ -1,0 +1,634 @@
+<!DOCTYPE HTML>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="X-UA-Compatible" content="chrome=1">
+<meta name="viewport" content="user-scalable=0, width=device-width, initial-scale=1.0" />
+<script src="require.js"></script>
+<script src="dat.gui.js"></script>
+<title>GPU springs</title>
+<style>
+#goo {
+	position: absolute;
+	top: 0px;
+	left: 0px;
+	bottom: 0px;
+	right: 0px;
+	width: 100%;
+	height: 100%;
+}
+</style>
+</head>
+<body>
+<script>
+
+	require(['goo'], function () {
+		require([
+			'goo/entities/GooRunner',
+			'goo/entities/World',
+			'goo/renderer/Material',
+			'goo/renderer/shaders/ShaderLib',
+			'goo/renderer/Camera',
+			'goo/entities/components/CameraComponent',
+			'goo/scripts/OrbitCamControlScript',
+			'goo/entities/EntityUtils',
+			'goo/entities/components/ScriptComponent',
+			'goo/renderer/MeshData',
+			'goo/entities/components/MeshRendererComponent',
+			'goo/math/Vector3',
+			'goo/renderer/light/DirectionalLight',
+			'goo/renderer/TextureCreator',
+			'goo/entities/components/LightComponent',
+			'goo/renderer/pass/RenderTarget',
+			'goo/renderer/Texture',
+			'goo/renderer/Shader',
+			'goo/renderer/pass/FullscreenUtil',
+			'goo/math/Transform',
+			'goo/scripts/Scripts',
+		], function(
+			GooRunner,
+			World,
+			Material,
+			ShaderLib,
+			Camera,
+			CameraComponent,
+			OrbitCamControlScript,
+			EntityUtils,
+			ScriptComponent,
+			MeshData,
+			MeshRendererComponent,
+			Vector3,
+			DirectionalLight,
+			TextureCreator,
+			LightComponent,
+			RenderTarget,
+			Texture,
+			Shader,
+			FullscreenUtil,
+			Transform,
+			Scripts
+		) {
+			'use strict';
+
+			var sizeX = Math.pow(2,7);
+			var size = getParameterByName('size');
+			if(size){
+				sizeX = parseFloat(size);
+			}
+			var sizeY = sizeX;
+			var stiffness = 50000;
+			var damping = 0.01;
+			var restLength = 100 / sizeX;
+			var dt = 1 / 240;
+			var g = [0, -40, 0];
+			var pointSize = 1;
+			var demo;
+			var velocityInfo;
+			var positionInfo;
+			var velocityTexture;
+			var positionTexture;
+			var goo;
+			var particleUpdateMaterial;
+			var particleUpdateVelocityMaterial;
+			var renderable;
+			var positionTarget1;
+			var positionTarget2;
+			var velocityTarget1;
+			var velocityTarget2;
+			var cursorX = -0.5;
+			var cursorY = -0.5;
+
+			window.onmousemove = function(evt){
+				cursorX = (evt.clientX / window.innerWidth - 0.5) * 2;
+				cursorY = (evt.clientY / window.innerHeight - 0.5) * 2;
+			}
+
+			function getParameterByName(name) {
+				name = name.replace(/[\[]/, "\\[").replace(/[\]]/, "\\]");
+				var regex = new RegExp("[\\?&]" + name + "=([^&#]*)"),
+					results = regex.exec(location.search);
+				return results == null ? "" : decodeURIComponent(results[1].replace(/\+/g, " "));
+			}
+
+			var textureSettings = {
+				type: 'Float',
+				minFilter: 'NearestNeighborNoMipMaps',
+				magFilter: 'NearestNeighbor',
+			};
+
+			function fillInfo(positionInfo, velocityInfo){
+				var vec = new Vector3();
+				for (var x = 0; x < sizeX; x++) {
+					for (var y = 0; y < sizeY; y++) {
+						var i = y * sizeX + x;
+
+						var invMass = (y == 0 ? 0 : 1);
+
+						// position
+						positionInfo[i * 4 + 0] = 0;
+						positionInfo[i * 4 + 1] = (sizeY / 2 - y) * restLength;
+						positionInfo[i * 4 + 2] = (x - sizeX / 2) * restLength;
+
+						// mass
+						positionInfo[i * 4 + 3] = invMass;
+
+						// velocity
+						velocityInfo[i * 4 + 0] = Math.sin(y/sizeY * Math.PI * 2) * Math.sin(x / sizeX * Math.PI * 2) * 13;
+						velocityInfo[i * 4 + 1] = Math.sin(y/sizeY) * 0;
+						velocityInfo[i * 4 + 2] = Math.sin(y/sizeY) * 0;
+
+						// mass
+						velocityInfo[i * 4 + 3] = invMass;
+					}
+				}
+			}
+
+			function particleDemo(goo) {
+				var camera = new Camera(45, 1, 1, 2000);
+
+				var orbitCamOptions = {
+					domElement        : goo.renderer.domElement,
+					lookAtDistance    : null,
+					spherical         : new Vector3(150,190,0),
+					lookAtPoint       : new Vector3(),
+					releaseVelocity   : true,
+					interpolationSpeed: 7,
+					dragButton        : 'Any'
+				};
+
+				// Fixes stats bug
+				goo.renderer.rendererRecord.shaderCache = {};
+
+				var orbitScript = Scripts.create(OrbitCamControlScript, orbitCamOptions);
+
+				var cameraEntity = goo.world.createEntity('CameraEntity', [20, 0, 0], orbitScript);
+				cameraEntity.setRotation(0, Math.PI/2, 0);
+				cameraEntity.setComponent(new CameraComponent(camera));
+				cameraEntity.addToWorld();
+
+				positionTarget1 = new RenderTarget(sizeX, sizeY, textureSettings);
+				positionTarget2 = new RenderTarget(sizeX, sizeY, textureSettings);
+				velocityTarget1 = new RenderTarget(sizeX, sizeY, textureSettings);
+				velocityTarget2 = new RenderTarget(sizeX, sizeY, textureSettings);
+
+				positionInfo = new Float32Array(4 * sizeX * sizeY);
+				velocityInfo = new Float32Array(4 * sizeX * sizeY);
+				fillInfo(positionInfo, velocityInfo);
+
+				positionTexture = new Texture(positionInfo, textureSettings, sizeX, sizeY);
+				positionTexture.generateMipmaps = false;
+
+				velocityTexture = new Texture(velocityInfo, textureSettings, sizeX, sizeY);
+				velocityTexture.generateMipmaps = false;
+
+				particleUpdateMaterial = new Material(particleUpdateShader);
+				particleUpdateVelocityMaterial = new Material(particleUpdateVelocityShader);
+
+				var sourcePosition = positionTexture;
+				var targetPosition = positionTarget2;
+
+				var sourceVelocity = velocityTexture;
+				var targetVelocity = velocityTarget2;
+
+				renderable = {
+					meshData: FullscreenUtil.quad,
+					materials: [],
+					transform: new Transform(),
+					shaderCache: {}
+				};
+
+				var particleEntity = createParticleEntity(goo, sizeX, sizeY);
+				var first = true;
+
+				goo.callbacksPreRender.push(function(tpf) {
+
+					var renderUniforms = particleEntity.meshRendererComponent.materials[0].uniforms;
+					renderUniforms.pointSize = demo.pointSize;
+
+					var velocityUniforms = particleUpdateVelocityMaterial.uniforms;
+					velocityUniforms.gx = demo.gravityX;
+					velocityUniforms.gy = demo.gravityY;
+					velocityUniforms.gz = demo.gravityZ;
+					velocityUniforms.k = demo.stiffness;
+					velocityUniforms.damping = demo.damping;
+					velocityUniforms.dt = 1 / demo.stepFrequency;
+					particleUpdateMaterial.uniforms.dt = 1 / demo.stepFrequency;
+
+					velocityUniforms.invSizeX = 1 / sizeX;
+					velocityUniforms.invSizeY = 1 / sizeY;
+					particleUpdateMaterial.uniforms.forcePos = [
+						-0.5,
+						-cursorY * 50,
+						-cursorX * 50
+					];
+
+					var subSteps = demo.stepFrequency / 60;
+
+					for(var i=0; i < subSteps; i++){
+
+						renderable.materials[0] = particleUpdateVelocityMaterial;
+						particleUpdateVelocityMaterial.setTexture('DIFFUSE_MAP', sourceVelocity);
+						particleUpdateVelocityMaterial.setTexture('START_MAP', velocityTexture);
+						particleUpdateVelocityMaterial.setTexture('POS_MAP', sourcePosition);
+						goo.renderer.render(renderable, FullscreenUtil.camera, [], targetVelocity, true);
+
+						renderable.materials[0] = particleUpdateMaterial;
+						particleUpdateMaterial.setTexture('DIFFUSE_MAP', sourcePosition);
+						particleUpdateMaterial.setTexture('START_MAP', positionTexture);
+						particleUpdateMaterial.setTexture('VELOCITY_MAP', targetVelocity);
+						goo.renderer.render(renderable, FullscreenUtil.camera, [], targetPosition, true);
+
+						particleEntity.meshRendererComponent.materials[0].setTexture('DIFFUSE_MAP', targetPosition);
+
+						if (first) {
+							sourcePosition = positionTarget1;
+							sourceVelocity = velocityTarget1;
+							first = false;
+						}
+
+						// Swap!
+						var tmp = targetVelocity;
+						targetVelocity = sourceVelocity;
+						sourceVelocity = tmp;
+
+						tmp = targetPosition;
+						targetPosition = sourcePosition;
+						sourcePosition = tmp;
+					}
+				});
+			}
+
+			function createParticleEntity(goo, sizeX, sizeY) {
+				var count = sizeX * sizeY;
+
+				var attributeMap = MeshData.defaultMap([MeshData.POSITION, MeshData.TEXCOORD0]);
+				var meshData = new MeshData(attributeMap, count);
+				meshData.indexModes = ['Points'];
+
+				var verts = meshData.getAttributeBuffer(MeshData.POSITION);
+				var uvs = meshData.getAttributeBuffer(MeshData.TEXCOORD0);
+
+				for (var x = 0; x < sizeX; x++) {
+					for (var y = 0; y < sizeY; y++) {
+						var i = y * sizeX + x;
+
+						verts[i * 3 + 0] = 0;
+						verts[i * 3 + 1] = 0;
+						verts[i * 3 + 2] = 0;
+
+						uvs[i * 2 + 0] = x / sizeX;
+						uvs[i * 2 + 1] = y / sizeY;
+					}
+				}
+
+				var material = new Material(particleShader);
+				var texture = new TextureCreator().loadTexture2D('goo.png');
+				material.setTexture('PARTICLE_MAP', texture);
+				var entity = goo.world.createEntity(goo.world, meshData, material).addToWorld();
+
+				return entity;
+			}
+
+			function init() {
+				goo = new GooRunner({
+					showStats: true,
+					logo: {
+						position: 'bottomright'
+					}
+				});
+				goo.renderer.domElement.id = 'goo';
+				document.body.appendChild(goo.renderer.domElement);
+				goo.renderer.setClearColor(0, 0, 0, 1);
+				particleDemo(goo);
+			}
+
+			var particleUpdateVelocityShader = {
+				attributes: {
+					vertexPosition: MeshData.POSITION,
+					vertexUV0: MeshData.TEXCOORD0
+				},
+				uniforms: {
+					viewProjectionMatrix: Shader.VIEW_PROJECTION_MATRIX,
+					worldMatrix: Shader.WORLD_MATRIX,
+					diffuseMap: Shader.DIFFUSE_MAP,
+					startMap: 'START_MAP',
+					posMap: 'POS_MAP',
+					tpf: Shader.TPF,
+					invSizeX: 1 / sizeX,
+					invSizeY: 1 / sizeY,
+					sizeX: sizeX,
+					sizeY: sizeY,
+					k: stiffness,
+					restLen: restLength,
+					restLen2: Math.sqrt(2) * restLength,
+					gx: g[0],
+					gy: g[1],
+					gz: g[2],
+					dt: dt,
+					damping: damping
+				},
+				vshader: [
+					'precision highp float;',
+					'attribute vec3 vertexPosition;',
+					'attribute vec2 vertexUV0;',
+
+					'uniform mat4 viewProjectionMatrix;',
+					'uniform mat4 worldMatrix;',
+
+					'varying vec2 vUv;',
+
+					'void main() {',
+					'   vUv = vertexUV0;',
+					'   gl_Position = viewProjectionMatrix * worldMatrix * vec4(vertexPosition, 1.0);',
+					'}'
+				].join('\n'),
+				fshader: [
+					'precision highp float;',
+					'uniform sampler2D diffuseMap;',
+					'uniform sampler2D startMap;',
+					'uniform sampler2D posMap;',
+					'uniform float tpf;',
+					'uniform float invSizeX;',
+					'uniform float invSizeY;',
+					'uniform float sizeX;',
+					'uniform float sizeY;',
+					'uniform float k;',
+					'uniform float gx;',
+					'uniform float gy;',
+					'uniform float gz;',
+					'uniform float restLen;',
+					'uniform float restLen2;',
+					'uniform float dt;',
+					'uniform float damping;',
+					'uniform vec2 resolution;',
+
+					'varying vec2 vUv;',
+
+					'void main() {',
+					'   vec4 vel = texture2D(diffuseMap, vUv);',
+					'   vec4 pos = texture2D(posMap, vUv);',
+					'   float invMass = pos.w;',
+					'   highp float minX = 0.0;',
+					'   highp float minY = 0.0;',
+					'   highp float maxX = (sizeX - 1.0);',
+					'   highp float maxY = (sizeY - 1.0);',
+					'   vec3 force = vec3(gx, gy, gz);',
+
+					// +y
+					'   if(floor(gl_FragCoord.y) < maxY){',
+					'   	vec3 dist1 = pos.xyz - texture2D(posMap, vUv + vec2(0, invSizeY)).xyz;',
+					'   	vec3 f1 = - k * (length(dist1) - restLen) * normalize(dist1);',
+					'   	force += f1;',
+					'	}',
+
+					// -y
+					'   if(floor(gl_FragCoord.y) > minY){',
+					'   	vec3 dist2 = pos.xyz - texture2D(posMap, vUv + vec2(0, -invSizeY)).xyz;',
+					'   	vec3 f2 = - k * (length(dist2) - restLen) * normalize(dist2);',
+					'   	force += f2;',
+					'	}',
+
+					// x
+					'	if(floor(gl_FragCoord.x) < maxX){',
+					'  		vec3 dist3 = pos.xyz - texture2D(posMap, vUv + vec2(invSizeX, 0)).xyz;',
+					'   	vec3 f3 = - k * (length(dist3) - restLen) * normalize(dist3);',
+					'   	force += f3;',
+					'	}',
+
+					// -x
+					'   if(floor(gl_FragCoord.x) > minX){',
+					'   	vec3 dist4 = pos.xyz - texture2D(posMap, vUv + vec2(-invSizeX, 0)).xyz;',
+					'   	vec3 f4 = - k * (length(dist4) - restLen) * normalize(dist4);',
+					'       force += f4;',
+					'   }',
+					// +xy
+					'   if(floor(gl_FragCoord.x) < maxX && floor(gl_FragCoord.y) < maxY){',
+					'   	vec3 dist5 = pos.xyz - texture2D(posMap, vUv + vec2(invSizeX, invSizeX)).xyz;',
+					'   	vec3 f5 = - k * (length(dist5) - restLen2) * normalize(dist5);',
+					'		force += f5;',
+					'   }',
+
+					// -xy
+					'   if(floor(gl_FragCoord.x) > minX && floor(gl_FragCoord.y) > minY){',
+					'   	vec3 dist6 = pos.xyz - texture2D(posMap, vUv + vec2(-invSizeX, -invSizeX)).xyz;',
+					'   	vec3 f6 = - k * (length(dist6) - restLen2) * normalize(dist6);',
+					'		force += f6;',
+					'   }',
+
+					// +x -y
+					'   if(floor(gl_FragCoord.x) < maxX && floor(gl_FragCoord.y) > minY){',
+					'   	vec3 dist5 = pos.xyz - texture2D(posMap, vUv + vec2(invSizeX, -invSizeX)).xyz;',
+					'   	vec3 f5 = - k * (length(dist5) - restLen2) * normalize(dist5);',
+					'		force += f5;',
+					'   }',
+
+					// -x +y
+					'   if(floor(gl_FragCoord.x) > minX && floor(gl_FragCoord.y) < maxY){',
+					'   	vec3 dist6 = pos.xyz - texture2D(posMap, vUv + vec2(-invSizeX, invSizeX)).xyz;',
+					'   	vec3 f6 = - k * (length(dist6) - restLen2) * normalize(dist6);',
+					'		force += f6;',
+					'   }',
+					'   vec4 newVel = vec4(vel.xyz + invMass * force * dt, invMass);',
+
+					'   newVel.xyz = newVel.xyz * pow(1.0 - damping, dt);',
+
+					'   gl_FragColor = newVel;',
+					'}'
+				].join('\n')
+			};
+
+			var particleUpdateShader = {
+				attributes: {
+					vertexPosition: MeshData.POSITION,
+					vertexUV0: MeshData.TEXCOORD0
+				},
+				uniforms: {
+					viewProjectionMatrix: Shader.VIEW_PROJECTION_MATRIX,
+					worldMatrix: Shader.WORLD_MATRIX,
+					diffuseMap: Shader.DIFFUSE_MAP,
+					velocityMap: 'VELOCITY_MAP',
+					startMap: 'START_MAP',
+					dt: dt,
+					radius: .8
+				},
+				vshader: [
+					'precision highp float;',
+					'attribute vec3 vertexPosition;',
+					'attribute vec2 vertexUV0;',
+
+					'uniform mat4 viewProjectionMatrix;',
+					'uniform mat4 worldMatrix;',
+
+					'varying vec2 vUv;',
+
+					'void main() {',
+					'   vUv = vertexUV0;',
+					'   gl_Position = viewProjectionMatrix * worldMatrix * vec4( vertexPosition, 1.0 );',
+					'}'
+				].join('\n'),
+				fshader: [
+					'precision highp float;',
+					'uniform sampler2D diffuseMap;',
+					'uniform sampler2D velocityMap;',
+					'uniform sampler2D startMap;',
+					'uniform vec3 forcePos;',
+
+					'uniform float dt;',
+					'uniform float radius;',
+					'varying vec2 vUv;',
+
+					'void main() {',
+					'   vec4 pos = texture2D(diffuseMap, vUv);',
+					'   vec4 vel = texture2D(velocityMap, vUv);',
+					'   vec3 newpos = pos.xyz + vel.xyz * dt;',
+
+					'   gl_FragColor = vec4(newpos, pos.w);',
+					'}'
+				].join('\n')
+			};
+
+			var particleShader = {
+				attributes: {
+					vertexUV0: MeshData.TEXCOORD0
+				},
+				uniforms: {
+					viewProjectionMatrix: Shader.VIEW_PROJECTION_MATRIX,
+					worldMatrix: Shader.WORLD_MATRIX,
+					diffuseMap: Shader.DIFFUSE_MAP,
+					particleMap: 'PARTICLE_MAP',
+					pointSize: pointSize
+				},
+				vshader: [
+					'attribute vec2 vertexUV0;',
+
+					'varying vec2 texCoord0;',
+
+					'uniform sampler2D diffuseMap;',
+
+					'uniform mat4 viewProjectionMatrix;',
+					'uniform mat4 worldMatrix;',
+					'uniform float pointSize;',
+
+					'void main(void) {',
+					'   texCoord0 = vertexUV0;',
+					'   vec4 vertexPosition = texture2D(diffuseMap, vertexUV0);',
+					'   gl_Position = viewProjectionMatrix * worldMatrix * vec4(vertexPosition.xyz, 1.0);',
+					'   gl_PointSize = pointSize;',
+					'}'
+				].join('\n'),
+				fshader: [
+      				'uniform sampler2D particleMap;',
+					'varying vec2 texCoord0;',
+					'void main(void){',
+					'   vec4 tex = texture2D(particleMap, texCoord0);',
+					'   if (tex.a <= 0.1) discard;',
+					'   gl_FragColor = tex;',
+					'}'
+				].join('\n')
+			};
+
+			init();
+
+			var gui = new dat.GUI();
+
+			function Demo(goo){
+				this.gravityX = 0;
+				this.gravityY = -40;
+				this.gravityZ = 0;
+				this.damping = damping;
+				this.stiffness = stiffness;
+				this.stepFrequency = 2 * 360;
+				this.pointSize = 1;
+				this.goo = goo;
+			}
+			Demo.prototype.readParam = function(name, parser){
+				var value = getParameterByName(name);
+				if(value) this[name] = parser(value);
+			}
+			Demo.prototype.size64 = function(){ window.location.href = "?size=64"; }
+			Demo.prototype.size128 = function(){ window.location.href = "?size=128"; }
+			Demo.prototype.size256 = function(){ window.location.href = "?size=256"; }
+			Demo.prototype.size512 = function(){ window.location.href = "?size=512"; }
+			Demo.prototype.size1024 = function(){ window.location.href = "?size=1024"; }
+			Demo.prototype.size2048 = function(){ window.location.href = "?size=2048"; }
+
+			var texturedMaterial = new Material({
+				defines: {
+					TEXCOORD0: true,
+					DIFFUSE_MAP: true
+				},
+				attributes : {
+					vertexPosition : MeshData.POSITION,
+					vertexUV0 : MeshData.TEXCOORD0
+				},
+				uniforms : {
+					viewProjectionMatrix : Shader.VIEW_PROJECTION_MATRIX,
+					worldMatrix : Shader.WORLD_MATRIX,
+					diffuseMap : Shader.DIFFUSE_MAP
+				},
+				vshader : [
+					'attribute vec3 vertexPosition;',
+					'attribute vec2 vertexUV0;',
+
+					'uniform mat4 viewProjectionMatrix;',
+					'uniform mat4 worldMatrix;',
+
+					'varying vec2 texCoord0;',
+
+					'void main(void) {',
+						'texCoord0 = vertexUV0;',
+						'gl_Position = viewProjectionMatrix * worldMatrix * vec4(vertexPosition, 1.0);',
+					'}'
+				].join('\n'),
+				fshader : [
+					'uniform sampler2D diffuseMap;',
+					'varying vec2 texCoord0;',
+					'void main(void)',
+					'{',
+						'gl_FragColor = texture2D(diffuseMap, texCoord0);',
+					'}'
+				].join('\n')
+			});
+
+			Demo.prototype.reset = function(){
+				fillInfo(positionInfo, velocityInfo);
+
+				positionTexture.setImage(positionInfo, sizeX, sizeY, textureSettings);
+				velocityTexture.setImage(velocityInfo, sizeX, sizeY, textureSettings);
+				positionTexture.setNeedsUpdate();
+				velocityTexture.setNeedsUpdate();
+
+				renderable.materials[0] = texturedMaterial;
+
+				texturedMaterial.setTexture('DIFFUSE_MAP', positionTexture);
+				goo.renderer.render(renderable, FullscreenUtil.camera, [], positionTarget1, true);
+				goo.renderer.render(renderable, FullscreenUtil.camera, [], positionTarget2, true);
+
+				texturedMaterial.setTexture('DIFFUSE_MAP', velocityTexture);
+				goo.renderer.render(renderable, FullscreenUtil.camera, [], velocityTarget1, true);
+				goo.renderer.render(renderable, FullscreenUtil.camera, [], velocityTarget2, true);
+			};
+
+			demo = new Demo(goo);
+
+			gui.add(demo, 'damping').min(0);
+			gui.add(demo, 'stiffness').min(1).step(100);
+			gui.add(demo, 'stepFrequency').min(60).step(60);
+			gui.add(demo, 'pointSize').min(1);
+			var m = 100;
+			gui.add(demo, 'gravityX', -m, m);
+			gui.add(demo, 'gravityY', -m, m);
+			gui.add(demo, 'gravityZ', -m, m);
+			gui.add(demo, 'reset');
+			gui.add(demo, 'size64');
+			gui.add(demo, 'size128');
+			gui.add(demo, 'size256');
+			gui.add(demo, 'size512');
+			gui.add(demo, 'size1024');
+			gui.add(demo, 'size2048');
+		});
+	});
+
+</script>
+</body>
+</html>
