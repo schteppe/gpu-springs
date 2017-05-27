@@ -41,6 +41,9 @@ body{
 <body>
 <script>
 
+// Fix for the "setVelocity" error in chrome
+PannerNode.prototype.setVelocity = AudioListener.prototype.setVelocity = function(){};
+
 	require(['goo'], function () {
 		require([
 			'goo/entities/GooRunner',
